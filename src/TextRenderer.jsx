@@ -8,7 +8,7 @@ function TextRenderer({ text }) {
     let cancelled = false
     import('katex').then(m => {
       if (!cancelled) setKatex(() => m.default)
-    })
+    }).catch(() => {})
     return () => { cancelled = true }
   }, [])
 
