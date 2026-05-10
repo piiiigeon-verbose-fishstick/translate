@@ -1,8 +1,17 @@
-import { useMemo } from 'react'
-import katex from 'katex'
+import { useMemo, useState, useEffect } from 'react'
 import 'katex/dist/katex.min.css'
 
 function TextRenderer({ text }) {
+  const [katex, setKatex] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    import('katex').then(m => {
+      if (!cancelled) setKatex(() => m.default)
+    })
+    return () => { cancelled = true }
+  }, [])
+
   const renderedContent = useMemo(() => {
     if (!text) return ''
 
@@ -26,28 +35,30 @@ function TextRenderer({ text }) {
       return `\x00INLINECODE_${idx}\x00`
     })
 
-    const mathPatterns = [
-      /\\\[([\s\S]*?)\\\]/g,
-      /\\\(([\s\S]*?)\\\)/g,
-      /\$\$([\s\S]*?)\$\$/g,
-      /\$(.*?)\$/g
-    ]
+    if (katex) {
+      const mathPatterns = [
+        /\\\[([\s\S]*?)\\\]/g,
+        /\\\(([\s\S]*?)\\\)/g,
+        /\$\$([\s\S]*?)\$\$/g,
+        /\$(.*?)\$/g
+      ]
 
-    mathPatterns.forEach((pattern, index) => {
-      const isBlock = index === 0 || index === 2
-      result = result.replace(pattern, (match, formula) => {
-        try {
-          return katex.renderToString(formula.trim(), {
-            throwOnError: false,
-            displayMode: isBlock
-          })
-        } catch {
-          return isBlock
-            ? `<div class="formula-error">${formula}</div>`
-            : `<span class="formula-error">${formula}</span>`
-        }
+      mathPatterns.forEach((pattern, index) => {
+        const isBlock = index === 0 || index === 2
+        result = result.replace(pattern, (match, formula) => {
+          try {
+            return katex.renderToString(formula.trim(), {
+              throwOnError: false,
+              displayMode: isBlock
+            })
+          } catch {
+            return isBlock
+              ? `<div class="formula-error">${formula}</div>`
+              : `<span class="formula-error">${formula}</span>`
+          }
+        })
       })
-    })
+    }
 
     result = result.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     result = result.replace(/__([^_]+)__/g, '<strong>$1</strong>')
@@ -79,7 +90,7 @@ function TextRenderer({ text }) {
     }
 
     return result
-  }, [text])
+  }, [text, katex])
 
   return (
     <div

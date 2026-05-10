@@ -1,7 +1,5 @@
 import { useState, useCallback, useRef } from 'react'
 import TextRenderer from './TextRenderer'
-import { PdfProcessor } from './utils/PdfProcessor'
-import * as mammoth from 'mammoth'
 
 function App() {
   const [uploadedFile, setUploadedFile] = useState(null)
@@ -20,6 +18,7 @@ function App() {
 
   const initPdfProcessor = useCallback(async () => {
     if (!pdfProcessorRef.current) {
+      const { PdfProcessor } = await import('./utils/PdfProcessor')
       pdfProcessorRef.current = new PdfProcessor()
       await pdfProcessorRef.current.init()
     }
@@ -36,6 +35,7 @@ function App() {
       let text = ''
 
       if (fileExtension === 'docx') {
+        const mammoth = await import('mammoth')
         const data = await file.arrayBuffer()
         const result = await mammoth.extractRawText({ arrayBuffer: data })
         text = result.value
