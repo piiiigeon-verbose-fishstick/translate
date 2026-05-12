@@ -122,9 +122,10 @@ function App() {
     const RATE_DELAY = 13000
 
     const callTranslationApi = async (text) => {
-      const response = await fetch('/api/chat/completions', {
+      const response = await fetch('https://www.dmxapi.cn/v1/chat/completions', {
         method: 'POST',
         headers: {
+          'Authorization': 'Bearer sk-cFDYqLoR8SglLZX7lasjkQwRyqnEvL0skzNd0vOwkKaAe5XN',
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
