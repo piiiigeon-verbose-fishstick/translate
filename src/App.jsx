@@ -144,7 +144,8 @@ function App() {
           const err = JSON.parse(responseText)
           errorMsg = err.error?.message || errorMsg
         } catch {
-          errorMsg = responseText || errorMsg
+          const stripped = responseText.replace(/<[^>]*>/g, '').trim()
+          errorMsg = stripped || errorMsg
         }
         throw new Error(errorMsg)
       }
@@ -240,7 +241,7 @@ function App() {
       const result = await callTranslationApi(sourceText)
       setTranslatedText(result)
     } catch (err) {
-      const lengthHints = ['context', 'length', 'too long', 'token', 'maximum', 'exceed', 'truncat']
+      const lengthHints = ['context', 'length', 'too long', 'token', 'maximum', 'exceed', 'truncat', 'timeout', 'inactivity']
       const isLengthError = lengthHints.some(hint => err.message.toLowerCase().includes(hint))
 
       if (isLengthError) {
