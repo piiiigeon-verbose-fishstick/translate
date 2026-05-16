@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "jszip": "^3.10.1",
     "katex": "^0.16.45",
     "mammoth": "^1.6.0",
     "pdfjs-dist": "^3.11.174",

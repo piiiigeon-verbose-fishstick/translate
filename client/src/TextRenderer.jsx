@@ -21,6 +21,13 @@ function TextRenderer({ text }) {
     result = result.replace(/</g, '&lt;')
     result = result.replace(/>/g, '&gt;')
 
+    const unclearMarkers = []
+    result = result.replace(/\x00UNCLEAR\x00([\s\S]*?)\x00\/UNCLEAR\x00/g, (_, word) => {
+      const idx = unclearMarkers.length
+      unclearMarkers.push(`<span class="ocr-low-confidence" title="OCR识别置信度低">${word}</span>`)
+      return `\x00UNCLEARMARKER_${idx}\x00`
+    })
+
     const codeBlocks = []
     result = result.replace(/```(\w+)?\n([\s\S]*?)```/g, (_, lang, code) => {
       const idx = codeBlocks.length
@@ -81,6 +88,7 @@ function TextRenderer({ text }) {
 
     result = result.replace(/\x00CODEBLOCK_(\d+)\x00/g, (_, idx) => codeBlocks[parseInt(idx)])
     result = result.replace(/\x00INLINECODE_(\d+)\x00/g, (_, idx) => inlineCodes[parseInt(idx)])
+    result = result.replace(/\x00UNCLEARMARKER_(\d+)\x00/g, (_, idx) => unclearMarkers[parseInt(idx)])
 
     result = result.replace(/\n\n/g, '</p><p>')
     result = result.replace(/\n/g, '<br/>')

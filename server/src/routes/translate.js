@@ -67,7 +67,7 @@ async function callTranslationApi(text, targetLang) {
       messages: [
         {
           role: 'user',
-          content: `Translate the following text to ${targetLang}. Only output the translation, no explanations:\n\n${text}`
+          content: `Translate to ${targetLang}. Translate every sentence completely, no skipping or summarizing. Output translation only:\n\n${text}`
         }
       ],
       max_tokens: 4096,
@@ -110,18 +110,31 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'targetLang must be "English" or "Chinese"' })
     }
 
+    const sourceLang = detectLanguage(text)
+    const estimatedTokens = estimateTokens(text, sourceLang)
+
     try {
       await rateLimiter.wait()
       const result = await callTranslationApi(text, targetLang)
+      console.log(`[translate] Full text OK — ${estimatedTokens} estimated tokens, ${text.length} chars`)
       return res.json({ translatedText: result, chunked: false })
     } catch (err) {
-      if (!isContextLengthError(err.message)) {
+      const isLengthErr = isContextLengthError(err.message)
+      // Worth chunking if text is long enough to split into at least 2 chunks (~1500 chars each)
+      const worthChunking = text.length > (sourceLang === 'Chinese' ? 800 : 2000)
+
+      console.warn(`[translate] Full text failed (${err.message}), isLengthErr=${isLengthErr}, worthChunking=${worthChunking}, chars=${text.length}`)
+
+      if (!isLengthErr && !worthChunking) {
         throw err
       }
 
       const chunks = splitTextIntoChunks(text)
+      console.log(`[translate] Split into ${chunks.length} chunks`)
       if (chunks.length <= 1) throw err
 
+      let successCount = 0
+      let failCount = 0
       const results = []
       for (let i = 0; i < chunks.length; i++) {
         for (let attempt = 0; attempt <= 2; attempt++) {
@@ -129,10 +142,14 @@ router.post('/', async (req, res) => {
             await rateLimiter.wait()
             const result = await callTranslationApi(chunks[i], targetLang)
             results.push(result)
+            successCount++
+            console.log(`[translate] Chunk ${i + 1}/${chunks.length} OK (${chunks[i].length} chars)`)
             break
           } catch (chunkErr) {
             if (attempt === 2) {
-              results.push(`[Translation failed: ${chunkErr.message}]`)
+              results.push(`[翻译失败: ${chunkErr.message}]`)
+              failCount++
+              console.error(`[translate] Chunk ${i + 1}/${chunks.length} FAILED: ${chunkErr.message}`)
               break
             }
             const isRateLimit = chunkErr.message.includes('429') || chunkErr.message.includes('rate')
@@ -145,11 +162,13 @@ router.post('/', async (req, res) => {
       return res.json({
         translatedText: results.join('\n\n'),
         chunked: true,
-        chunksTotal: chunks.length
+        chunksTotal: chunks.length,
+        successCount,
+        failCount
       })
     }
   } catch (err) {
-    console.error('Translation error:', err)
+    console.error(`[translate] Fatal error:`, err.message)
     return res.status(500).json({ error: err.message || 'Internal server error' })
   }
 })
