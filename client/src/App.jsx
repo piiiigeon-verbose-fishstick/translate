@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef } from 'react'
 import TextRenderer from './TextRenderer'
 import * as mammoth from 'mammoth'
+import { translateText } from './api/translate'
 
 function App() {
   const [uploadedFile, setUploadedFile] = useState(null)
@@ -119,141 +120,12 @@ function App() {
     const targetLang = isChineseSource ? 'English' : 'Chinese'
     const directionLabel = isChineseSource ? '中→英' : '英→中'
 
-    const RATE_DELAY = 13000
-
-    const callTranslationApi = async (text) => {
-      const response = await fetch('https://www.dmxapi.cn/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': 'Bearer sk-cFDYqLoR8SglLZX7lasjkQwRyqnEvL0skzNd0vOwkKaAe5XN',
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          model: 'Hunyuan-MT-7B',
-          messages: [
-            { role: 'user', content: `Translate the following text to ${targetLang}. Only output the translation, no explanations:\n\n${text}` }
-          ],
-          max_tokens: 4096,
-          temperature: 0.1
-        })
-      })
-
-      if (!response.ok) {
-        const responseText = await response.text()
-        let errorMsg = `HTTP ${response.status}`
-        try {
-          const err = JSON.parse(responseText)
-          errorMsg = err.error?.message || errorMsg
-        } catch {
-          const stripped = responseText.replace(/<[^>]*>/g, '').trim()
-          errorMsg = stripped || errorMsg
-        }
-        throw new Error(errorMsg)
-      }
-
-      const data = await response.json()
-      const result = data.choices?.[0]?.message?.content
-      if (!result) throw new Error('翻译返回为空')
-      return result
-    }
-
-    const splitTextIntoChunks = (text, chunkSize) => {
-      const chunks = []
-      let currentChunk = ''
-
-      const paragraphs = text.split('\n\n')
-
-      for (const paragraph of paragraphs) {
-        if (currentChunk.length + paragraph.length + 2 <= chunkSize) {
-          currentChunk += (currentChunk ? '\n\n' : '') + paragraph
-        } else {
-          if (currentChunk) chunks.push(currentChunk)
-          if (paragraph.length > chunkSize) {
-            const sentences = paragraph.split(/(?<=[.!?。！？])\s*/)
-            let temp = ''
-            for (const sentence of sentences) {
-              if (temp.length + sentence.length <= chunkSize) {
-                temp += sentence
-              } else {
-                if (temp) chunks.push(temp)
-                temp = sentence
-              }
-            }
-            if (temp) chunks.push(temp)
-          } else {
-            currentChunk = paragraph
-          }
-        }
-      }
-
-      if (currentChunk) chunks.push(currentChunk)
-      return chunks
-    }
-
-    const doChunkedTranslation = async () => {
-      const chunkSize = isChineseSource ? 1500 : 6000
-      const chunks = splitTextIntoChunks(sourceText, chunkSize)
-      const totalChunks = chunks.length
-      const results = new Array(totalChunks).fill(null)
-      let completedCount = 0
-
-      setTranslatedText(`${directionLabel} | 文本较长，分为 ${totalChunks} 段翻译 (0/${totalChunks})`)
-
-      for (let i = 0; i < totalChunks; i++) {
-        for (let attempt = 0; attempt <= 3; attempt++) {
-          try {
-            const result = await callTranslationApi(chunks[i])
-            results[i] = result
-            completedCount++
-            break
-          } catch (err) {
-            const isRateLimit = err.message.includes('429') || err.message.includes('rate')
-            if (attempt === 3) {
-              results[i] = `[翻译失败: ${err.message}]`
-              completedCount++
-              break
-            }
-            const delay = isRateLimit ? RATE_DELAY + 3000 : Math.min(Math.pow(2, attempt) * 2000, 10000)
-            await new Promise(resolve => setTimeout(resolve, delay))
-          }
-        }
-
-        const partial = results
-          .map((r, idx) => (r !== null ? r : `[等待翻译: 段落 ${idx + 1}]`))
-          .join('\n\n')
-
-        const remaining = totalChunks - completedCount
-        const waitInfo = i < totalChunks - 1
-          ? `\n\n[等待速率限制... 剩余 ${remaining} 段，预计还需约 ${Math.round(remaining * RATE_DELAY / 1000 / 60)} 分钟]`
-          : ''
-
-        setTranslatedText(`${directionLabel} | 进度: ${completedCount}/${totalChunks}\n\n${partial}${waitInfo}`)
-
-        if (i < totalChunks - 1) {
-          await new Promise(resolve => setTimeout(resolve, RATE_DELAY))
-        }
-      }
-
-      setTranslatedText(results.join('\n\n'))
-    }
-
     try {
       setTranslatedText(`${directionLabel} | 正在翻译...`)
-      const result = await callTranslationApi(sourceText)
-      setTranslatedText(result)
+      const result = await translateText(sourceText, targetLang)
+      setTranslatedText(result.translatedText)
     } catch (err) {
-      const lengthHints = ['context', 'length', 'too long', 'token', 'maximum', 'exceed', 'truncat', 'timeout', 'inactivity']
-      const isLengthError = lengthHints.some(hint => err.message.toLowerCase().includes(hint))
-
-      if (isLengthError) {
-        try {
-          await doChunkedTranslation()
-        } catch (chunkErr) {
-          setError(`翻译失败: ${chunkErr.message}`)
-        }
-      } else {
-        setError(`翻译失败: ${err.message}`)
-      }
+      setError(`翻译失败: ${err.message}`)
     } finally {
       setIsTranslating(false)
     }
