@@ -67,7 +67,7 @@ async function callTranslationApi(text, targetLang) {
       messages: [
         {
           role: 'user',
-          content: `Translate to ${targetLang}. Translate every sentence completely, no skipping or summarizing. Output translation only:\n\n${text}`
+          content: `[TRANSLATION TASK]\nTranslate the following document to ${targetLang} sentence by sentence.\n\nThis is a TRANSLATION task, NOT a summarization task. Do NOT summarize, condense, omit, or rewrite any content. Translate every sentence literally and completely. Preserve all formatting markers. Output translation only:\n\n${text}`
         }
       ],
       max_tokens: 4096,
