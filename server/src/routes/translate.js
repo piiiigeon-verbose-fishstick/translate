@@ -66,12 +66,16 @@ async function callTranslationApi(text, targetLang) {
       model: 'Hunyuan-MT-7B',
       messages: [
         {
+          role: 'system',
+          content: '你是一个专业翻译引擎。你的唯一任务是逐句翻译文档，必须翻译每一句话，不允许总结、概括、省略、合并或改写任何内容。保持原文格式标记不变。直接输出翻译结果，不要添加任何解释或说明。'
+        },
+        {
           role: 'user',
-          content: `[TRANSLATION TASK]\nTranslate the following document to ${targetLang} sentence by sentence.\n\nThis is a TRANSLATION task, NOT a summarization task. Do NOT summarize, condense, omit, or rewrite any content. Translate every sentence literally and completely. Preserve all formatting markers. Output translation only:\n\n${text}`
+          content: `将以下文档逐句翻译为${targetLang}，必须翻译每一句话，不允许总结或省略任何内容：\n\n${text}`
         }
       ],
       max_tokens: 4096,
-      temperature: 0.1
+      temperature: 0
     })
   })
 
