@@ -3,6 +3,7 @@ import TextRenderer from './TextRenderer'
 import * as mammoth from 'mammoth'
 import { translateText } from './api/translate'
 import { PptProcessor } from './utils/PptProcessor'
+import { PdfProcessor } from './utils/PdfProcessor'
 
 function App() {
   const [uploadedFile, setUploadedFile] = useState(null)
@@ -36,7 +37,6 @@ function App() {
 
   const initPdfProcessor = useCallback(async () => {
     if (!pdfProcessorRef.current) {
-      const { PdfProcessor } = await import('./utils/PdfProcessor')
       pdfProcessorRef.current = new PdfProcessor()
       await pdfProcessorRef.current.init()
     }
