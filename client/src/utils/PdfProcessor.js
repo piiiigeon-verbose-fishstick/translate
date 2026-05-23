@@ -29,32 +29,44 @@ export class PdfProcessor {
       onProgress
     } = options
 
-    // Phase 1: try text layer extraction
-    onProgress?.({ phase: 'text', current: 0, total: pdf.numPages })
-    let textContent = ''
+    const pageTexts = []
 
-    try {
-      textContent = await this.extractTextContent(pdf, onProgress)
-    } catch (extractError) {
-      console.warn('文本提取失败，尝试OCR:', extractError.message)
-    }
+    for (let i = 1; i <= pdf.numPages; i++) {
+      let pageText = ''
 
-    if (textContent.trim()) {
-      return enableMathDetection ? this.extractMathFormulas(textContent) : textContent
-    }
-
-    // Phase 2: OCR fallback
-    onProgress?.({ phase: 'ocr', current: 0, total: pdf.numPages })
-
-    try {
-      const ocrText = await this.performOCR(pdf, { scale, onProgress })
-      if (!ocrText.trim()) {
-        throw new Error('OCR未能识别出文字，请确认PDF中包含清晰的文字图片')
+      // Try text layer extraction first for this page
+      onProgress?.({ phase: 'text', current: i, total: pdf.numPages })
+      try {
+        const page = await pdf.getPage(i)
+        const content = await page.getTextContent()
+        pageText = this.structureText(content.items)
+      } catch (e) {
+        console.warn(`第${i}页文本提取失败:`, e.message)
       }
-      return enableMathDetection ? this.extractMathFormulas(ocrText) : ocrText
-    } catch (ocrError) {
-      throw new Error(`OCR识别失败: ${ocrError.message}`)
+
+      // If text extraction yielded too little, fall back to OCR for this page
+      if (pageText.trim().length < 30) {
+        try {
+          const ocrText = await this.processPageForOCR(pdf, i, { scale })
+          if (ocrText.trim()) {
+            pageText = `--- 第 ${i} 页 ---\n${ocrText.trim()}`
+          }
+        } catch (ocrErr) {
+          console.warn(`第${i}页OCR失败:`, ocrErr.message)
+        }
+      }
+
+      if (pageText.trim()) {
+        pageTexts.push(pageText.trim())
+      }
     }
+
+    const fullText = pageTexts.join('\n\n')
+    if (!fullText.trim()) {
+      throw new Error('无法从PDF中提取文字，请确认PDF中包含清晰的文字')
+    }
+
+    return enableMathDetection ? this.extractMathFormulas(fullText) : fullText
   }
 
   async extractTextContent(pdf, onProgress) {
