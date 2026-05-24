@@ -5,12 +5,21 @@ import { createWorker } from 'tesseract.js'
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker
 
 const MAX_CANVAS_DIM = 3072
+const TEXT_RICH_THRESHOLD = 200   // chars above this → definitely text page, skip image check
+const TEXT_SPARSE_THRESHOLD = 20   // chars below this → likely empty/image-only page
+
+const IMAGE_OPS = new Set([
+  pdfjsLib.OPS.paintImageXObject,
+  pdfjsLib.OPS.paintJpegXObject,
+  pdfjsLib.OPS.paintJpxImage,
+  pdfjsLib.OPS.paintInlineImageXObject,
+  pdfjsLib.OPS.paintImageMaskXObject
+])
 
 export class PdfProcessor {
   constructor() {
     this.scale = 1.2
     this.maxConcurrentPages = 4
-    this.enableMathDetection = false
     this.worker = null
   }
 
@@ -19,12 +28,38 @@ export class PdfProcessor {
     this.worker = await createWorker('eng+chi_sim')
   }
 
+  // ---- Direct image OCR (PNG / JPG) ----
+
+  async extractTextFromImage(file, options = {}) {
+    const { onProgress } = options
+    onProgress?.({ phase: 'ocr', current: 1, total: 1 })
+
+    const imageData = await this._fileToDataURL(file)
+    const result = await this.worker.recognize(imageData, { output: 'hocr' })
+
+    if (result.data?.hocr) {
+      const hocrText = this.parseHOCRSimple(result.data.hocr)
+      if (hocrText.trim()) return hocrText
+    }
+    return result.data?.text?.trim() || ''
+  }
+
+  async _fileToDataURL(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result)
+      reader.onerror = reject
+      reader.readAsDataURL(file)
+    })
+  }
+
+  // ---- PDF extraction ----
+
   async extractTextFromPdf(file, options = {}) {
     const data = await file.arrayBuffer()
     const pdf = await pdfjsLib.getDocument({ data }).promise
 
     const {
-      enableMathDetection = this.enableMathDetection,
       scale = this.scale,
       onProgress
     } = options
@@ -33,28 +68,55 @@ export class PdfProcessor {
 
     for (let i = 1; i <= pdf.numPages; i++) {
       let pageText = ''
+      let hasImages = false
 
-      // Try text layer extraction first for this page
+      // Try text layer extraction first
       onProgress?.({ phase: 'text', current: i, total: pdf.numPages })
       try {
         const page = await pdf.getPage(i)
         const content = await page.getTextContent()
         pageText = this.structureText(content.items)
       } catch (e) {
-        console.warn(`第${i}页文本提取失败:`, e.message)
+        console.warn(`Page ${i} text extraction failed:`, e.message)
       }
 
-      // If text extraction yielded too little, fall back to OCR for this page
-      if (pageText.trim().length < 30) {
+      const textLen = pageText.replace(/\s/g, '').length
+
+      // Decision: check for images when text is sparse
+      if (textLen < TEXT_RICH_THRESHOLD) {
+        try {
+          const page = await pdf.getPage(i)
+          const ops = await page.getOperatorList()
+          hasImages = ops.fnArray.some(fn => IMAGE_OPS.has(fn))
+        } catch (e) {
+          console.warn(`Page ${i} operator list failed:`, e.message)
+        }
+      }
+
+      if (textLen < TEXT_SPARSE_THRESHOLD && hasImages) {
+        // Almost no text + has images: pure image page, OCR only
         try {
           const ocrText = await this.processPageForOCR(pdf, i, { scale })
           if (ocrText.trim()) {
             pageText = `--- 第 ${i} 页 ---\n${ocrText.trim()}`
           }
         } catch (ocrErr) {
-          console.warn(`第${i}页OCR失败:`, ocrErr.message)
+          console.warn(`Page ${i} OCR failed:`, ocrErr.message)
+        }
+      } else if (textLen >= TEXT_SPARSE_THRESHOLD && textLen < TEXT_RICH_THRESHOLD && hasImages) {
+        // Mix of text and images: merge both
+        try {
+          const ocrText = await this.processPageForOCR(pdf, i, { scale })
+          if (ocrText.trim()) {
+            pageText = pageText.trim()
+              ? `${pageText.trim()}\n\n[图片内容]\n${ocrText.trim()}`
+              : `--- 第 ${i} 页 ---\n${ocrText.trim()}`
+          }
+        } catch (ocrErr) {
+          console.warn(`Page ${i} OCR failed:`, ocrErr.message)
         }
       }
+      // else: rich text (>=200 chars) or sparse text without images → use text extraction only
 
       if (pageText.trim()) {
         pageTexts.push(pageText.trim())
@@ -66,64 +128,80 @@ export class PdfProcessor {
       throw new Error('无法从PDF中提取文字，请确认PDF中包含清晰的文字')
     }
 
-    return enableMathDetection ? this.extractMathFormulas(fullText) : fullText
+    return fullText
   }
 
-  async extractTextContent(pdf, onProgress) {
-    let fullText = ''
-
-    for (let i = 1; i <= pdf.numPages; i++) {
-      onProgress?.({ phase: 'text', current: i, total: pdf.numPages })
-      const page = await pdf.getPage(i)
-      const content = await page.getTextContent()
-      const structuredText = this.structureText(content.items)
-      fullText += structuredText + '\n\n'
-    }
-
-    return fullText.trim()
-  }
+  // ---- Text structuring with heading detection ----
 
   structureText(items) {
     if (!items || items.length === 0) return ''
 
-    items.sort((a, b) => {
+    // Group items into lines by Y coordinate
+    const lines = []
+    let currentLine = []
+    let lastY = null
+
+    const sorted = [...items].sort((a, b) => {
       const yDiff = b.transform[5] - a.transform[5]
       if (Math.abs(yDiff) > 5) return yDiff
       return a.transform[4] - b.transform[4]
     })
 
-    let result = ''
-    let lastY = null
-
-    items.forEach((item, index) => {
-      const currentY = item.transform[5]
-
-      if (lastY !== null && lastY - currentY > 10) {
-        result += '\n\n'
-      } else if (lastY !== null && lastY - currentY > 2) {
-        result += '\n'
-      } else if (index > 0) {
-        result += ' '
+    sorted.forEach((item) => {
+      const y = item.transform[5]
+      if (lastY !== null && Math.abs(lastY - y) > 2) {
+        if (currentLine.length) lines.push(currentLine)
+        currentLine = []
       }
-
-      const isBold = item.fontName?.includes('Bold') || item.fontName?.includes('bold')
-      const isItalic = item.fontName?.includes('Italic') || item.fontName?.includes('italic')
-
-      if (isBold && isItalic) {
-        result += `**_${item.str}_**`
-      } else if (isBold) {
-        result += `**${item.str}**`
-      } else if (isItalic) {
-        result += `_${item.str}_`
-      } else {
-        result += item.str
-      }
-
-      lastY = currentY
+      currentLine.push(item)
+      lastY = y
     })
+    if (currentLine.length) lines.push(currentLine)
+
+    // Calculate heights for each line
+    const lineData = lines.map(line => {
+      const heights = line.map(item => Math.abs(item.transform[0]) || item.height || 0)
+      const avgHeight = heights.reduce((a, b) => a + b, 0) / heights.length
+      const text = line.map(item => item.str).join('')
+      const isBold = line.some(item =>
+        item.fontName?.includes('Bold') || item.fontName?.includes('bold'))
+      const isItalic = line.some(item =>
+        item.fontName?.includes('Italic') || item.fontName?.includes('italic'))
+      return { text, height: avgHeight, isBold, isItalic }
+    })
+
+    // Find the median height (body text baseline)
+    const heights = lineData.map(l => l.height).sort((a, b) => a - b)
+    const medianHeight = heights[Math.floor(heights.length / 2)] || 12
+
+    // Build output with heading markers
+    let result = ''
+    for (const line of lineData) {
+      const ratio = line.height / medianHeight
+      let prefix = ''
+
+      if (ratio > 1.6) {
+        prefix = '## '
+      } else if (ratio > 1.3) {
+        prefix = '### '
+      }
+
+      let text = line.text
+      if (line.isBold && line.isItalic) {
+        text = `**_${text}_**`
+      } else if (line.isBold) {
+        text = `**${text}**`
+      } else if (line.isItalic) {
+        text = `_${text}_`
+      }
+
+      result += prefix + text + '\n\n'
+    }
 
     return result.trim()
   }
+
+  // ---- OCR ----
 
   async performOCR(pdf, options = {}) {
     const numPages = pdf.numPages
@@ -155,7 +233,6 @@ export class PdfProcessor {
     const page = await pdf.getPage(pageNum)
     let viewport = page.getViewport({ scale })
 
-    // Cap canvas size to stay within browser limits
     if (viewport.width > MAX_CANVAS_DIM || viewport.height > MAX_CANVAS_DIM) {
       const ratio = Math.min(MAX_CANVAS_DIM / viewport.width, MAX_CANVAS_DIM / viewport.height)
       viewport = page.getViewport({ scale: scale * ratio })
@@ -248,35 +325,8 @@ export class PdfProcessor {
 
       return result.trim()
     } catch (e) {
-      console.warn('HOCR解析失败:', e.message)
+      console.warn('HOCR parse failed:', e.message)
       return ''
     }
-  }
-
-  extractMathFormulas(text) {
-    if (!text) return ''
-
-    const mathPatterns = [
-      /([a-zA-Z]+\s*[=<>≥≤≠]?\s*[0-9]+(\.[0-9]+)?(\s*[+\-*/^]\s*[a-zA-Z0-9.]+)+)/g,
-      /(\(\s*[a-zA-Z0-9]+\s*[+\-*/]\s*[a-zA-Z0-9]+\s*\))/g,
-      /([a-zA-Z]+\s*\(\s*[a-zA-Z0-9, ]+\s*\))/g,
-      /(\$[^$]+\$)/g,
-      /(\\frac\{[^}]+\}\{[^}]+\})/g,
-      /(\\sqrt\{[^}]+\})/g,
-      /([0-9]+\s*x\s*\^\s*[0-9]+)/g
-    ]
-
-    let result = text
-
-    mathPatterns.forEach((pattern) => {
-      result = result.replace(pattern, (match) => {
-        if (!match.includes('$')) {
-          return `$${match}$`
-        }
-        return match
-      })
-    })
-
-    return result
   }
 }

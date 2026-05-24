@@ -5,19 +5,24 @@ import { translateText } from './api/translate'
 import { PptProcessor } from './utils/PptProcessor'
 import { PdfProcessor } from './utils/PdfProcessor'
 
+const IMG_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp', 'bmp'])
+const SUPPORTED_FORMATS = 'PDF、DOCX、MD、PPTX、PNG、JPG'
+
 function App() {
   const [uploadedFile, setUploadedFile] = useState(null)
   const [sourceText, setSourceText] = useState('')
+  const [sourceHtml, setSourceHtml] = useState('')
   const [translatedText, setTranslatedText] = useState('')
   const [isTranslating, setIsTranslating] = useState(false)
   const [error, setError] = useState('')
   const [isParsing, setIsParsing] = useState(false)
   const [parseMessage, setParseMessage] = useState('')
   const [ocrSettings, setOcrSettings] = useState({
-    scale: 1.2,
-    enableMathDetection: false
+    scale: 1.2
   })
   const [isSourceCollapsed, setIsSourceCollapsed] = useState(false)
+  const [inputMode, setInputMode] = useState('file')
+  const [textInput, setTextInput] = useState('')
   const pdfProcessorRef = useRef(null)
 
   const [theme, setTheme] = useState(() => {
@@ -46,17 +51,23 @@ function App() {
   const parseFile = useCallback(async (file) => {
     setError('')
     setIsParsing(true)
-    setParseMessage('正在解析文件...')
     const fileExtension = file.name.split('.').pop().toLowerCase()
 
     try {
       let text = ''
+      let html = ''
 
       if (fileExtension === 'docx') {
+        setParseMessage('正在解析 Word 文档...')
         const data = await file.arrayBuffer()
-        const result = await mammoth.extractRawText({ arrayBuffer: data })
-        text = result.value
+        const [htmlResult, textResult] = await Promise.all([
+          mammoth.convertToHtml({ arrayBuffer: data }),
+          mammoth.extractRawText({ arrayBuffer: data })
+        ])
+        html = htmlResult.value
+        text = textResult.value
       } else if (fileExtension === 'md') {
+        setParseMessage('正在读取 Markdown...')
         text = await file.text()
       } else if (fileExtension === 'pptx') {
         setParseMessage('正在解析演示文稿...')
@@ -65,7 +76,7 @@ function App() {
       } else if (fileExtension === 'pdf') {
         const processor = await initPdfProcessor()
         text = await processor.extractTextFromPdf(file, {
-          ...ocrSettings,
+          scale: ocrSettings.scale,
           onProgress: (p) => {
             if (p.phase === 'text') {
               setParseMessage(`正在提取文本... ${p.current}/${p.total} 页`)
@@ -74,15 +85,21 @@ function App() {
             }
           }
         })
+      } else if (IMG_EXTENSIONS.has(fileExtension)) {
+        setParseMessage('正在 OCR 识别图片...')
+        const processor = await initPdfProcessor()
+        text = await processor.extractTextFromImage(file, {
+          onProgress: () => {}
+        })
       } else {
         throw new Error('不支持的文件格式')
       }
 
-      if (!text.trim()) {
+      if (!text.trim() && !html.trim()) {
         throw new Error('文件内容为空')
       }
 
-      return text
+      return { text, html }
     } catch (err) {
       console.error('文件解析错误:', err)
       const errorMsg = err instanceof Error ? err.message :
@@ -93,21 +110,24 @@ function App() {
       setIsParsing(false)
       setParseMessage('')
     }
-  }, [initPdfProcessor, ocrSettings])
+  }, [initPdfProcessor, ocrSettings.scale])
 
   const processFile = useCallback(async (file) => {
     setError('')
     setUploadedFile(file)
     setSourceText('')
+    setSourceHtml('')
     setTranslatedText('')
     setIsSourceCollapsed(false)
 
     try {
-      const text = await parseFile(file)
+      const { text, html } = await parseFile(file)
       setSourceText(text)
+      setSourceHtml(html || '')
     } catch (err) {
       setError(err.message)
       setSourceText('')
+      setSourceHtml('')
     }
   }, [parseFile])
 
@@ -133,9 +153,36 @@ function App() {
     if (file) processFile(file)
   }, [processFile])
 
+  const handleTextSubmit = useCallback(() => {
+    if (!textInput.trim()) return
+    setError('')
+    setUploadedFile(null)
+    setSourceHtml('')
+    setSourceText(textInput.trim())
+    setTranslatedText('')
+    setIsSourceCollapsed(false)
+  }, [textInput])
+
+  const handleTextClear = useCallback(() => {
+    setTextInput('')
+    setSourceText('')
+    setSourceHtml('')
+    setTranslatedText('')
+    setUploadedFile(null)
+    setError('')
+  }, [])
+
+  const handleInputModeChange = useCallback((mode) => {
+    setInputMode(mode)
+    setError('')
+    if (mode === 'file') {
+      setTextInput('')
+    }
+  }, [])
+
   const handleTranslate = useCallback(async () => {
     if (!sourceText.trim()) {
-      setError('请先上传文件')
+      setError('请先上传文件或输入文本')
       return
     }
 
@@ -166,7 +213,7 @@ function App() {
       <div className="header-row">
         <div>
           <h1>AI翻译助手</h1>
-          <p>支持 PDF、Word、Markdown、PPT 文件一键翻译</p>
+          <p>支持 {SUPPORTED_FORMATS} 文件一键翻译</p>
         </div>
         <button
           className="theme-toggle-btn"
@@ -180,84 +227,124 @@ function App() {
 
       <div className="upload-section">
         {error && <div className="error-message">{error}</div>}
-        
-        <div className="ocr-settings">
-          <label className="settings-label">OCR 设置<p>OCR只涉及图片形式PDF，其他格式请忽略此设置</p></label>
-          <div className="settings-row">
-            <div className="setting-item">
-              <label>分辨率:</label>
-              <select 
-                value={ocrSettings.scale} 
-                onChange={(e) => setOcrSettings({...ocrSettings, scale: parseFloat(e.target.value)})}
-              >
-                <option value={1.2}>快速失真 (1.2x)</option>
-                <option value={1.5}>标准 (1.5x)</option>
-                <option value={2.0}>高精度 (2.0x)</option>
-              </select>
-            </div>
-            <div className="setting-item">
-              <label>
-                <input 
-                  type="checkbox" 
-                  checked={ocrSettings.enableMathDetection}
-                  onChange={(e) => setOcrSettings({...ocrSettings, enableMathDetection: e.target.checked})}
-                />
-                启用公式识别
-              </label>
-            </div>
-          </div>
+
+        <div className="input-mode-toggle">
+          <button
+            className={`input-mode-btn ${inputMode === 'file' ? 'active' : ''}`}
+            onClick={() => handleInputModeChange('file')}
+          >
+            上传文件
+          </button>
+          <button
+            className={`input-mode-btn ${inputMode === 'text' ? 'active' : ''}`}
+            onClick={() => handleInputModeChange('text')}
+          >
+            直接输入
+          </button>
         </div>
-        
-        <div
-          className="upload-area"
-          onDragOver={handleDragOver}
-          onDragLeave={handleDragLeave}
-          onDrop={handleDrop}
-          onClick={() => document.getElementById('file-input')?.click()}
-        >
-          <input
-            id="file-input"
-            type="file"
-            accept=".pdf,.docx,.md,.pptx"
-            onChange={handleFileChange}
-            style={{ display: 'none' }}
-          />
-          <div className="upload-icon">
+
+        {inputMode === 'file' ? (
+          <>
+            <div className="ocr-settings">
+              <label className="settings-label">OCR 设置<span className="settings-hint">（图片型 PDF / 图片文件会使用 OCR）</span></label>
+              <div className="settings-row">
+                <div className="setting-item">
+                  <label>分辨率:</label>
+                  <select
+                    value={ocrSettings.scale}
+                    onChange={(e) => setOcrSettings({...ocrSettings, scale: parseFloat(e.target.value)})}
+                  >
+                    <option value={1.2}>快速失真 (1.2x)</option>
+                    <option value={1.5}>标准 (1.5x)</option>
+                    <option value={2.0}>高精度 (2.0x)</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <div
+              className="upload-area"
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+              onClick={() => document.getElementById('file-input')?.click()}
+            >
+              <input
+                id="file-input"
+                type="file"
+                accept=".pdf,.docx,.md,.pptx,.png,.jpg,.jpeg,.webp,.bmp"
+                onChange={handleFileChange}
+                style={{ display: 'none' }}
+              />
+              <div className="upload-icon">
                 <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
                   <polyline points="17 8 12 3 7 8"/>
                   <line x1="12" y1="3" x2="12" y2="15"/>
                 </svg>
               </div>
-          <div className="upload-text">
-            {isParsing ? parseMessage : (uploadedFile ? `已选择: ${uploadedFile.name}` : '拖拽文件到这里或点击上传')}
+              <div className="upload-text">
+                {isParsing ? parseMessage : (uploadedFile ? `已选择: ${uploadedFile.name}` : '拖拽文件到这里或点击上传')}
+              </div>
+              <div className="upload-hint">支持 {SUPPORTED_FORMATS} 格式文件</div>
+            </div>
+          </>
+        ) : (
+          <div className="text-input-wrapper">
+            <textarea
+              className="text-input-area"
+              value={textInput}
+              onChange={(e) => setTextInput(e.target.value)}
+              placeholder="在此输入或粘贴要翻译的文本…"
+            />
+            <div className="text-input-footer">
+              <span className="char-count">{textInput.length} 字符</span>
+              <div className="text-input-actions">
+                <button className="text-clear-btn" onClick={handleTextClear}>清空</button>
+                <button
+                  className="load-btn"
+                  onClick={handleTextSubmit}
+                  disabled={isTranslating || isParsing || !textInput.trim()}
+                >
+                  载入文本
+                </button>
+                <button
+                  className="translate-btn text-translate-btn"
+                  onClick={handleTranslate}
+                  disabled={isTranslating || isParsing || !sourceText.trim()}
+                >
+                  {isTranslating ? '翻译中...' : '一键翻译'}
+                </button>
+              </div>
+            </div>
           </div>
-          <div className="upload-hint">支持 PDF、DOCX、MD、PPTX 格式文件</div>
-        </div>
+        )}
 
-        <button
-          className="translate-btn"
-          onClick={handleTranslate}
-          disabled={!sourceText.trim() || isTranslating || isParsing}
-        >
-          {isTranslating ? '翻译中...' : (isParsing ? '解析中...' : '一键翻译')}
-        </button>
+        {inputMode === 'file' && (
+          <button
+            className="translate-btn"
+            onClick={handleTranslate}
+            disabled={isTranslating || isParsing || !sourceText.trim()}
+          >
+            {isTranslating ? '翻译中...' : (isParsing ? '解析中...' : '一键翻译')}
+          </button>
+        )}
       </div>
 
       <div className="compare-section">
         <div className="document-panel">
           <div className="panel-header">
             <div className="panel-icon">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                  <polyline points="14 2 14 8 20 8"/>
-                  <line x1="16" y1="13" x2="8" y2="13"/>
-                  <line x1="16" y1="17" x2="8" y2="17"/>
-                </svg>
-              </div>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <polyline points="14 2 14 8 20 8"/>
+                <line x1="16" y1="13" x2="8" y2="13"/>
+                <line x1="16" y1="17" x2="8" y2="17"/>
+              </svg>
+            </div>
             <div className="panel-title">原始文档</div>
             {sourceText && (
-              <button 
+              <button
                 className="collapse-btn"
                 onClick={() => setIsSourceCollapsed(!isSourceCollapsed)}
                 title={isSourceCollapsed ? '展开' : '折叠'}
@@ -273,22 +360,24 @@ function App() {
                   <span>点击上方箭头展开原文</span>
                   <span className="char-count">共 {sourceText.length} 字符</span>
                 </div>
+              ) : sourceHtml ? (
+                <TextRenderer html={sourceHtml} text={sourceText} />
               ) : (
                 <TextRenderer text={sourceText} />
               )
-            ) : '请上传文件查看原始内容'}
+            ) : '请上传文件或输入文本查看原始内容'}
           </div>
         </div>
 
         <div className="document-panel">
           <div className="panel-header">
             <div className="panel-icon">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <circle cx="12" cy="12" r="10"/>
-                  <line x1="2" y1="12" x2="22" y2="12"/>
-                  <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
-                </svg>
-              </div>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10"/>
+                <line x1="2" y1="12" x2="22" y2="12"/>
+                <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+              </svg>
+            </div>
             <div className="panel-title">翻译结果</div>
           </div>
           <div className="document-content">
