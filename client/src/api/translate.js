@@ -1,5 +1,5 @@
 const API_URL = import.meta.env.VITE_API_URL || '/api'
-const REQUEST_TIMEOUT_MS = 120000
+const REQUEST_TIMEOUT_MS = 600000
 
 async function fetchWithTimeout(url, options, timeoutMs = REQUEST_TIMEOUT_MS) {
   const controller = new AbortController()

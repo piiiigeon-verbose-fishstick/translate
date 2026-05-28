@@ -94,7 +94,9 @@ async function callTranslationApi(text, targetLang) {
 
   const data = await response.json()
   const result = data.choices?.[0]?.message?.content
+  const finishReason = data.choices?.[0]?.finish_reason
   if (!result) throw new Error('Translation returned empty')
+  if (finishReason === 'length') throw new Error('Translation truncated due to output length limit')
   return result
 }
 
@@ -102,6 +104,39 @@ function isContextLengthError(message) {
   const hints = ['context', 'length', 'too long', 'token', 'maximum', 'exceed', 'truncat']
   return hints.some(hint => message.toLowerCase().includes(hint))
 }
+
+async function translateChunks(chunks, targetLang) {
+  let successCount = 0
+  let failCount = 0
+  const results = []
+  for (let i = 0; i < chunks.length; i++) {
+    for (let attempt = 0; attempt <= 2; attempt++) {
+      try {
+        await rateLimiter.wait()
+        const result = await callTranslationApi(chunks[i], targetLang)
+        results.push(result)
+        successCount++
+        console.log(`[translate] Chunk ${i + 1}/${chunks.length} OK (${chunks[i].length} chars)`)
+        break
+      } catch (chunkErr) {
+        if (attempt === 2) {
+          results.push(`[翻译失败: ${chunkErr.message}]`)
+          failCount++
+          console.error(`[translate] Chunk ${i + 1}/${chunks.length} FAILED: ${chunkErr.message}`)
+          break
+        }
+        const isRateLimit = chunkErr.message.includes('429') || chunkErr.message.includes('rate')
+        const delay = isRateLimit ? 15000 : Math.min(Math.pow(2, attempt) * 2000, 8000)
+        await new Promise(r => setTimeout(r, delay))
+      }
+    }
+  }
+  return { results, successCount, failCount }
+}
+
+// Threshold: if input exceeds this many estimated tokens, skip full-text and chunk directly.
+// Keeps output well under the 4096 max_tokens limit (translation output ≈ input length).
+const PREEMPTIVE_CHUNK_TOKEN_THRESHOLD = 2500
 
 router.post('/', async (req, res) => {
   try {
@@ -117,6 +152,21 @@ router.post('/', async (req, res) => {
     const sourceLang = detectLanguage(text)
     const estimatedTokens = estimateTokens(text, sourceLang)
 
+    // Preemptive chunking for long texts: skip the full-text call to avoid
+    // silent truncation from max_tokens=4096 when output would exceed it.
+    if (estimatedTokens > PREEMPTIVE_CHUNK_TOKEN_THRESHOLD) {
+      const chunks = splitTextIntoChunks(text)
+      console.log(`[translate] Preemptive chunking: ${chunks.length} chunks (${estimatedTokens} est. tokens, ${text.length} chars)`)
+      const { results, successCount, failCount } = await translateChunks(chunks, targetLang)
+      return res.json({
+        translatedText: results.join('\n\n'),
+        chunked: true,
+        chunksTotal: chunks.length,
+        successCount,
+        failCount
+      })
+    }
+
     try {
       await rateLimiter.wait()
       const result = await callTranslationApi(text, targetLang)
@@ -124,7 +174,6 @@ router.post('/', async (req, res) => {
       return res.json({ translatedText: result, chunked: false })
     } catch (err) {
       const isLengthErr = isContextLengthError(err.message)
-      // Worth chunking if text is long enough to split into at least 2 chunks (~1500 chars each)
       const worthChunking = text.length > (sourceLang === 'Chinese' ? 800 : 2000)
 
       console.warn(`[translate] Full text failed (${err.message}), isLengthErr=${isLengthErr}, worthChunking=${worthChunking}, chars=${text.length}`)
@@ -134,35 +183,10 @@ router.post('/', async (req, res) => {
       }
 
       const chunks = splitTextIntoChunks(text)
-      console.log(`[translate] Split into ${chunks.length} chunks`)
+      console.log(`[translate] Fallback chunking: ${chunks.length} chunks`)
       if (chunks.length <= 1) throw err
 
-      let successCount = 0
-      let failCount = 0
-      const results = []
-      for (let i = 0; i < chunks.length; i++) {
-        for (let attempt = 0; attempt <= 2; attempt++) {
-          try {
-            await rateLimiter.wait()
-            const result = await callTranslationApi(chunks[i], targetLang)
-            results.push(result)
-            successCount++
-            console.log(`[translate] Chunk ${i + 1}/${chunks.length} OK (${chunks[i].length} chars)`)
-            break
-          } catch (chunkErr) {
-            if (attempt === 2) {
-              results.push(`[翻译失败: ${chunkErr.message}]`)
-              failCount++
-              console.error(`[translate] Chunk ${i + 1}/${chunks.length} FAILED: ${chunkErr.message}`)
-              break
-            }
-            const isRateLimit = chunkErr.message.includes('429') || chunkErr.message.includes('rate')
-            const delay = isRateLimit ? 15000 : Math.min(Math.pow(2, attempt) * 2000, 8000)
-            await new Promise(r => setTimeout(r, delay))
-          }
-        }
-      }
-
+      const { results, successCount, failCount } = await translateChunks(chunks, targetLang)
       return res.json({
         translatedText: results.join('\n\n'),
         chunked: true,
